@@ -1,143 +1,150 @@
 import socket
+from select import select
+from time import strftime
 from traceback import format_exc
-from time import sleep, time
-from sys import argv
-from os import spawnl, P_NOWAIT
-from threading import Thread
 
-HOST = '192.168.32.48'
-LOGIN_PORT = 11093
+LOCAL_HOST = '192.168.0.4'
+REMOTE_HOST = '172.24.169.42'
 
-IN, OUT = 0, 1
+LOCAL_PORT = 3000
+REMOTE_PORT = 3000
 
-zones = {
-    'running': [],
-    'waiting': [],
-}
+def log(*args):
+    print(strftime('[%Y-%m-%d %H:%M:%S]'), *args)
 
-def start_zone(port):
-    zones['waiting'].append(
-        Thread(target=zone_serve,
-               name='{}'.format(port),
-               args=(port,)))
+class Port():
+    def __init__(self, local_address, remote_address):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(local_address)
+        self.sock.listen()
+        self.local_address = local_address
+        self.remote_address = remote_address
+        self.buffer = None
 
-def zone_serve(port):
-    def log(*args):
-        print('[{}]'.format(port), *args)
+    def fileno(self):
+        return self.sock.fileno()
 
-    sock = [None, None]
-
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(('127.0.0.1', port))
-    server.listen(1)
-
-    log('awaiting connection in port {}'.format(port))
-    sock[IN] = server.accept()[0]
-    sock[IN].setblocking(0)
-    log('client has connected')
-
-    sock[OUT] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    #sock[OUT].setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock[OUT].connect((HOST, port))
-    sock[OUT].setblocking(0)
-    log('connection has been tunnelled')
-
-    try:
-        while True:
+    def accept(self):
+        s1, _ = self.sock.accept()
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s2.connect(self.remote_address)
+        except:
             try:
-                packet = sock[OUT].recv(65535)
-                if packet:
-                    sock[IN].send(packet)
-                else:
-                    log('server closed the connection')
-                    break
-            except ConnectionResetError:
-                log('server closed the connection')
-                break
-            except BlockingIOError:
-                pass
-            except KeyboardInterrupt:
-                break
+                s1.close()
             except:
-                log(time())
-                log(format_exc())
-                break
-
-            try:
-                packet = sock[IN].recv(65535)
-                if packet:
-                    sock[OUT].send(packet)
-                else:
-                    log('client closed the connection')
-                    break
-            except ConnectionResetError:
-                log('client closed the connection')
-                break
-            except BlockingIOError:
                 pass
-            except KeyboardInterrupt:
-                break
-            except:
-                log(time())
-                log(format_exc())
-                break
+            return ()
 
-    finally:
+        local_sock = Tunnel(s1, 'local', self.local_address)
+        remote_sock = Tunnel(s2, 'remote', self.remote_address)
+        local_sock.peer = remote_sock
+        remote_sock.peer = local_sock
+        return (local_sock, remote_sock)
+
+class Tunnel():
+    def __init__(self, sock, half, addr):
+        self.sock = sock
+        self.half = half
+        self.addr = '{}:{}'.format(*addr)
+        self.buffer = b''
+        self.sock.setblocking(0)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.done = False
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def tunnel(self):
+        try:
+            packet = self.sock.recv(4096)
+            if not packet:
+                raise ConnectionResetError
+        except (ConnectionResetError, ConnectionAbortedError):
+            return self.peer.shutdown()
+
+        self.peer.buffer += packet
+        try:
+            return self.peer.resend()
+        except BlockingIOError:  # wait for select()
+            return 0
+
+    def resend(self):
+        if not self.buffer:
+            return 0
+
+        try:
+            sent = self.sock.send(self.buffer)
+            if sent == 0:
+                raise ConnectionResetError
+        except (ConnectionResetError, ConnectionAbortedError):
+            return self.peer.shutdown()
+
+        self.buffer = self.buffer[sent:]
+        return 0
+
+    def shutdown(self):
+        self.done = True
         errors = 0
 
         try:
-            sock[IN].close()
-        except:
+            self.sock.shutdown(socket.SHUT_WR)
+        except Exception:
+            log(format_exc())
             errors += 1
+
+        if self.peer.done:
+            for s in (self.sock, self.peer.sock):
+                try:
+                    s.close()
+                except Exception:
+                    log(format_exc())
+                    errors += 1
+
+        return errors if errors else -1
+
+socks = [Port((LOCAL_HOST, LOCAL_PORT), (REMOTE_HOST, REMOTE_PORT))]
+
+log('Ready!')
+while True:
+    rlist, wlist, _ = select(socks, filter(lambda s: s.buffer, socks), (), 2)
+
+    for s in wlist:
+        try:
+            result = s.resend()
+        except Exception:
+            log('Tunnel failed on', s.peer.sock, '\n' + format_exc())
+            socks.remove(s)
+            continue
+
+        if result == -1:
+            socks.remove(s)
+            log('Connection shut down successfully ({}, {})'.format(s.addr, s.half))
+
+        if result > 0:
+            socks.remove(s)
+            log('Connection shut down with', result, 'errors on', s.peer.sock,
+                '({}, {})'.format(s.addr, s.half))
+
+    for s in rlist:
+        if s.buffer is None:
+            list(map(socks.append, s.accept()))
+            log('Tunnel opened to', s.remote_address)
+            continue
 
         try:
-            sock[OUT].close()
-        except:
-            errors += 1
+            result = s.tunnel()
+        except Exception:
+            log('Tunnel failed on', s.sock, '\n' + format_exc())
+            socks.remove(s)
+            continue
 
-        try:
-            server.close()
-        except:
-            errors += 1
+        if result == -1:
+            socks.remove(s)
+            log('Connection shut down successfully ({}, {})'.format(s.addr, s.half))
 
-        log('tunnel torn down with {} errors'.format(errors))
-
-
-#############
-
-
-start_zone(LOGIN_PORT)
-for port in range(11601, 11743):
-    if port == 11707:
-        port = 11107
-    start_zone(port)
-
-try:
-    while True:
-        for i, zone in enumerate(zones['running']):
-            if not zone.is_alive():
-                zones['running'].pop(i)
-                zone.join()
-                print('reaped zone {}'.format(zone.name))
-                start_zone(int(zone.name))
-
-        if zones['waiting']:
-            zone = zones['waiting'].pop(0)
-            zone.start()
-            zones['running'].append(zone)
-
-        sleep(0.5)
-
-finally:
-    errors = 0
-    while zones['running']:
-        zone = zones['running'].pop(0)
-
-        try:
-            zone.join()
-            print('reaped zone {}'.format(zone.name))
-        except:
-            errors += 1
-
-    print('exited with {} thread.join exceptions'.format(errors))
+        if result > 0:
+            socks.remove(s)
+            log('Connection shut down with', result, 'errors on', s.sock,
+                '({}, {})'.format(s.addr, s.half))
