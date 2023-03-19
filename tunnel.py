@@ -111,69 +111,58 @@ class Tunnel():
 
         return errors if errors else STATUS_SHUTDOWN
 
-addr_pairs = []
-for addr_pair in argv[1:]:
+def parse_addr_pair(addr_pair):
+    def parse_port(port):
+        try:
+            port = int(port)
+        except ValueError:
+            raise ValueError(f'Invalid port number: {port}')
+        if port < 1 or port > 65535:
+            raise ValueError(f'Invalid port number: {port}')
+
+        return port
+
+    def parse_host(host):
+        try:
+            host = ip_address(host)
+        except ValueError:
+            raise ValueError(f'Invalid address: {host}')
+        if host.version == 6:
+            raise NotImplementedError('IPv6 is not supported yet')
+
+        return str(host)
+
     pieces = addr_pair.split(':')
     if '' in pieces:
-        log('IPv6 is not supported yet')
-        exit()
+        raise NotImplementedError('IPv6 is not supported yet')
     if len(pieces) < 2 or len(pieces) > 4:
-        log('Invalid format:', addr_pair)
-        exit()
+        raise ValueError(f'Invalid format: {addr_pair}')
 
-    port = pieces.pop(-1)
-    try:
-        port = int(port)
-        if port < 1 or port > 65535:
-            raise ValueError  # reuse except clause
-    except ValueError:
-        log('Invalid port number:', port)
-        exit()
-
-    host = pieces.pop(-1)
-    try:
-        host = ip_address(host)
-    except ValueError:
-        log('Invalid address:', host)
-        exit()
-    if host.version == 6:
-        log('IPv6 is not supported yet')
-        exit()
-    host = str(host)
-
+    port = parse_port(pieces.pop(-1))
+    host = parse_host(pieces.pop(-1))
     remote_addr = host, port
 
     if pieces:
-        # FIXME: DRY!
-        port = pieces.pop(-1)
-        try:
-            port = int(port)
-            if port < 1 or port > 65535:
-                raise ValueError  # reuse except clause
-        except ValueError:
-            log('Invalid port number:', port)
-            exit()
+        port = parse_port(pieces.pop(-1))
     else:
         port = 0
 
     if pieces:
-        # FIXME: DRY! again...
-        host = pieces.pop(-1)
-        try:
-            host = ip_address(host)
-        except ValueError:
-            log('Invalid address:', host)
-            exit()
-        if host.version == 6:
-            log('IPv6 is not supported yet')
-            exit()
-        host = str(host)
+        host = parse_host(pieces.pop(-1))
     else:
         host = '0.0.0.0'
 
     local_addr = host, port
 
-    addr_pairs.append((local_addr, remote_addr))
+    return (local_addr, remote_addr)
+
+addr_pairs = []
+for arg in argv[1:]:
+    try:
+        addr_pairs.append(parse_addr_pair(arg))
+    except Exception as e:
+        log(e)
+        exit()
 
 socks = []
 for pair in addr_pairs:
