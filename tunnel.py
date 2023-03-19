@@ -5,6 +5,10 @@ from traceback import format_exc
 from sys import argv
 from ipaddress import ip_address
 
+if len(argv) == 1 or '-h' in argv or '--help' in argv:
+    # TODO: print usage
+    exit()
+
 STATUS_OK = 0
 STATUS_SHUTDOWN = -1
 
@@ -44,6 +48,9 @@ class Port():
         remote_sock.peer = local_sock
         return [local_sock, remote_sock]
 
+    def close(self):
+        self.sock.close()
+
 class Tunnel():
     def __init__(self, sock, half, addr):
         self.sock = sock
@@ -62,7 +69,7 @@ class Tunnel():
             if not packet:
                 raise ConnectionResetError
         except (ConnectionResetError, ConnectionAbortedError):
-            return self.peer.shutdown()
+            return self.peer.close()
 
         self.peer.buffer += packet
         try:
@@ -79,12 +86,12 @@ class Tunnel():
             if sent == 0:
                 raise ConnectionResetError
         except (ConnectionResetError, ConnectionAbortedError):
-            return self.peer.shutdown()
+            return self.peer.close()
 
         self.buffer = self.buffer[sent:]
         return STATUS_OK
 
-    def shutdown(self):
+    def close(self):
         self.done = True
         errors = 0
 
@@ -104,7 +111,7 @@ class Tunnel():
 
         return errors if errors else STATUS_SHUTDOWN
 
-socks = []
+addr_pairs = []
 for addr_pair in argv[1:]:
     pieces = addr_pair.split(':')
     if '' in pieces:
@@ -166,9 +173,21 @@ for addr_pair in argv[1:]:
 
     local_addr = host, port
 
-    p = Port(local_addr, remote_addr)
-    socks.append(p)
-    log('Routing {}:{} -> {}:{}'.format(*p.local_addr, *p.remote_addr))
+    addr_pairs.append((local_addr, remote_addr))
+
+socks = []
+for pair in addr_pairs:
+    try:
+        s = Port(*pair)
+    except Exception as e:
+        log('Failed to set up tunnel {}:{} -> {}:{}\n{}'.format(
+            *pair[0], *pair[1], e))
+        for s in socks:
+            s.close()
+        exit()
+
+    socks.append(s)
+    log('Routing {}:{} -> {}:{}'.format(*s.local_addr, *s.remote_addr))
 
 log('Ready!')
 while True:
