@@ -2,12 +2,8 @@ import socket
 from select import select
 from time import strftime
 from traceback import format_exc
-
-LOCAL_HOST = '0.0.0.0'
-REMOTE_HOST = '172.12.0.2'
-
-LOCAL_PORT = 8000
-REMOTE_PORT = 8000
+from sys import argv
+from ipaddress import ip_address
 
 STATUS_OK = 0
 STATUS_SHUTDOWN = -1
@@ -33,11 +29,14 @@ class Port():
         try:
             # FIXME: might block for too long?
             s2.connect(self.remote_addr)
-        except:
+        except Exception as e:
+            e.args += (s1.getsockname(),)
             try:
+                s1.shutdown(socket.SHUT_RDWR)
                 s1.close()
-            finally:
-                raise
+            except:
+                pass
+            raise
 
         local_sock = Tunnel(s1, 'local', s1.getsockname())
         remote_sock = Tunnel(s2, 'remote', self.remote_addr)
@@ -105,7 +104,71 @@ class Tunnel():
 
         return errors if errors else STATUS_SHUTDOWN
 
-socks = [Port((LOCAL_HOST, LOCAL_PORT), (REMOTE_HOST, REMOTE_PORT))]
+socks = []
+for addr_pair in argv[1:]:
+    pieces = addr_pair.split(':')
+    if '' in pieces:
+        log('IPv6 is not supported yet')
+        exit()
+    if len(pieces) < 2 or len(pieces) > 4:
+        log('Invalid format:', addr_pair)
+        exit()
+
+    port = pieces.pop(-1)
+    try:
+        port = int(port)
+        if port < 1 or port > 65535:
+            raise ValueError  # reuse except clause
+    except ValueError:
+        log('Invalid port number:', port)
+        exit()
+
+    host = pieces.pop(-1)
+    try:
+        host = ip_address(host)
+    except ValueError:
+        log('Invalid address:', host)
+        exit()
+    if host.version == 6:
+        log('IPv6 is not supported yet')
+        exit()
+    host = str(host)
+
+    remote_addr = host, port
+
+    if pieces:
+        # FIXME: DRY!
+        port = pieces.pop(-1)
+        try:
+            port = int(port)
+            if port < 1 or port > 65535:
+                raise ValueError  # reuse except clause
+        except ValueError:
+            log('Invalid port number:', port)
+            exit()
+    else:
+        port = 0
+
+    if pieces:
+        # FIXME: DRY! again...
+        host = pieces.pop(-1)
+        try:
+            host = ip_address(host)
+        except ValueError:
+            log('Invalid address:', host)
+            exit()
+        if host.version == 6:
+            log('IPv6 is not supported yet')
+            exit()
+        host = str(host)
+    else:
+        host = '0.0.0.0'
+
+    local_addr = host, port
+
+    p = Port(local_addr, remote_addr)
+    socks.append(p)
+    log('Routing {}:{} -> {}:{}'.format(*p.local_addr, *p.remote_addr))
 
 log('Ready!')
 while True:
@@ -134,8 +197,9 @@ while True:
             try:
                 new_socks = s.accept()
             except Exception as e:
+                local_addr = e.args[-1]
                 log('Failed to open tunnel: {}:{} -> {}:{}\n{}'.format(
-                    *s.local_addr, *s.remote_addr, e))
+                    *local_addr, *s.remote_addr, e))
             else:
                 socks += new_socks
                 log('Tunnel opened: {}:{} -> {}:{}'.format(
