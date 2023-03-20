@@ -150,7 +150,7 @@ def parse_addr_pair(addr_pair):
     if pieces:
         host = parse_host(pieces.pop(-1))
     else:
-        host = '0.0.0.0'
+        host = '127.0.0.1'
 
     local_addr = host, port
 
