@@ -16,12 +16,12 @@ def log(*args):
     print(strftime('[%Y-%m-%d %H:%M:%S]'), *args)
 
 class Port():
-    def __init__(self, local_addr, remote_addr):
+    def __init__(self, src_addr, dest_addr):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(local_addr)
+        self.sock.bind(src_addr)
         self.sock.listen()
-        self.local_addr = self.sock.getsockname()
-        self.remote_addr = remote_addr
+        self.src_addr = self.sock.getsockname()
+        self.dest_addr = dest_addr
         self.buffer = None
 
     def fileno(self):
@@ -32,7 +32,7 @@ class Port():
         s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             # FIXME: might block for too long?
-            s2.connect(self.remote_addr)
+            s2.connect(self.dest_addr)
         except Exception as e:
             e.args += (s1.getsockname(),)
             try:
@@ -42,11 +42,11 @@ class Port():
                 pass
             raise
 
-        local_sock = Tunnel(s1, 'local', s1.getsockname())
-        remote_sock = Tunnel(s2, 'remote', self.remote_addr)
-        local_sock.peer = remote_sock
-        remote_sock.peer = local_sock
-        return [local_sock, remote_sock]
+        src_sock = Tunnel(s1, 'source', s1.getsockname())
+        dest_sock = Tunnel(s2, 'destination', self.dest_addr)
+        src_sock.peer = dest_sock
+        dest_sock.peer = src_sock
+        return [src_sock, dest_sock]
 
     def close(self):
         self.sock.close()
@@ -140,7 +140,7 @@ def parse_addr_pair(addr_pair):
 
     port = parse_port(pieces.pop(-1))
     host = parse_host(pieces.pop(-1))
-    remote_addr = host, port
+    dest_addr = host, port
 
     if pieces:
         port = parse_port(pieces.pop(-1))
@@ -152,9 +152,9 @@ def parse_addr_pair(addr_pair):
     else:
         host = '127.0.0.1'
 
-    local_addr = host, port
+    src_addr = host, port
 
-    return (local_addr, remote_addr)
+    return (src_addr, dest_addr)
 
 addr_pairs = []
 for arg in argv[1:]:
@@ -176,7 +176,7 @@ for pair in addr_pairs:
         exit()
 
     socks.append(s)
-    log('Routing {}:{} -> {}:{}'.format(*s.local_addr, *s.remote_addr))
+    log('Routing {}:{} -> {}:{}'.format(*s.src_addr, *s.dest_addr))
 
 log('Ready!')
 while True:
@@ -205,13 +205,13 @@ while True:
             try:
                 new_socks = s.accept()
             except Exception as e:
-                local_addr = e.args[-1]
+                src_addr = e.args[-1]
                 log('Failed to open tunnel: {}:{} -> {}:{}\n{}'.format(
-                    *local_addr, *s.remote_addr, e))
+                    *src_addr, *s.dest_addr, e))
             else:
                 socks += new_socks
                 log('Tunnel opened: {}:{} -> {}:{}'.format(
-                    *new_socks[0].addr, *s.remote_addr))
+                    *new_socks[0].addr, *s.dest_addr))
             continue
 
         try:
